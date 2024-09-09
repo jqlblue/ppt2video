@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import os
 import edge_tts
 import fitz
 from functools import partial
@@ -16,6 +17,9 @@ from string import Template
 import subprocess
 import tempfile
 from typing import Any, TypeGuard
+import shutil
+import math
+from xml.sax.saxutils import escape
 
 def get_note_from_slide(slide: Slide) -> str | None:
     if not slide.has_notes_slide:
@@ -26,6 +30,13 @@ def get_note_from_slide(slide: Slide) -> str | None:
         return None
 
     return notes_text
+
+# convert edge tts vtt timestamp to srt format
+def ms_to_srt_time(time_unit):
+    hour = math.floor(time_unit / 10**7 / 3600)
+    minute = math.floor((time_unit / 10**7 / 60) % 60)
+    seconds = (time_unit / 10**7) % 60
+    return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
 
 def get_notes_from_ppt_file(ppt_file_path: Path) -> list[str | None]:
     prs = Presentation(ppt_file_path)
@@ -80,27 +91,75 @@ async def convert_ppt_to_image(ppt_file_path: Path,
 
 async def convert_note_to_audio(note: str,
                           output_file_path: Path,
-                          voice: str) -> Path:
-    communicate = edge_tts.Communicate(note, voice)
-    await communicate.save(output_file_path)
+                          output_subtitles_file_path: Path,
+                          voice: str) -> dict:
+    communicate_note = edge_tts.Communicate(note, voice)
+
+    # parse note text to note_sections array
+    note_paragraphs = note.split("\n")
+    logger.info('Generate Audio communicate note_paragraphs `{note_paragraphs}`', note_paragraphs=note_paragraphs)
+
+    srt_index = 1
+    last_start_time = 0
+
+    for index, note_paragraph in enumerate(note_paragraphs, start=1):
+        if note_paragraph != '':
+            communicate_note_paragraph = edge_tts.Communicate(note_paragraph, voice)
+
+            start_time = 0
+            end_time = 0
+
+            async for chunk in communicate_note_paragraph.stream():
+                if chunk["type"] == "WordBoundary":
+                    if start_time == 0:
+                        start_time = chunk["offset"]
+                    end_time = chunk["offset"] + chunk["duration"]
+
+            if last_start_time != 0:
+                start_time_srt = ms_to_srt_time(last_start_time)
+                end_time_srt = ms_to_srt_time(end_time + last_start_time)
+                last_start_time = end_time + last_start_time
+            else:
+                start_time_srt = ms_to_srt_time(start_time)
+                end_time_srt = ms_to_srt_time(end_time)
+                last_start_time = end_time
+
+            with open(output_subtitles_file_path, "ab") as srt_file:
+                srt_file.write(f"{srt_index}\n".encode())
+                srt_file.write(f"{start_time_srt} --> {end_time_srt}\n".encode())
+                srt_file.write(f"{escape(note_paragraph)}\n\n".encode())
+
+            logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
+
+            # update subtitles index
+            srt_index += 1
+
+    await communicate_note.save(output_file_path)
+
     logger.info('Generate Audio file from note in `{output_file_path}`', output_file_path=output_file_path)
 
-    return output_file_path
+    return dict(
+        audio=output_file_path,
+        subtitles=output_subtitles_file_path
+    )
 
 async def convert_notes_to_audio(notes: list[str],
                                  output_dir: Path,
                                  output_filename: Template,
-                                 voice: str) -> list[Path]:
+                                 output_subtitles_filename: Template,
+                                 voice: str) -> list[dict]:
     tasks = list()
     async with asyncio.TaskGroup() as tg:
         for index, note in enumerate(notes, start=1):
             output_file_path = output_dir / output_filename.substitute(index=index)
-            tasks.append(tg.create_task(convert_note_to_audio(note, output_file_path, voice)))
+            output_subtitles_file_path = output_dir / output_subtitles_filename.substitute(index=index)
+            tasks.append(tg.create_task(convert_note_to_audio(note, output_file_path, output_subtitles_file_path, voice)))
 
     return list(map(lambda task: task.result(), tasks))
 
 def convert_video(image_file_path: Path,
                   audio_file_path: Path,
+                  audio_subtitles_file_path: Path,
                   output_file_path: Path,
                   ffmpeg_file_path: Path,
                   encoding: str) -> Path:
@@ -108,6 +167,7 @@ def convert_video(image_file_path: Path,
                              '-loop', '1',
                              '-i', image_file_path,
                              '-i', audio_file_path,
+                             '-vf', f"subtitles={audio_subtitles_file_path}",
                              '-c:v', 'libx264',
                              '-c:a', 'copy',
                              '-shortest',
@@ -119,16 +179,18 @@ def convert_video(image_file_path: Path,
     return output_file_path
 
 def convert_videos(image_file_paths: list[Path],
-                  audio_file_paths: list[Path],
+                  audio_file_paths: list[dict],
                   output_dir: Path,
                   output_filename: Template,
                   ffmpeg_file_path: Path,
                   encoding: str) -> list[Path]:
     result = list()
 
-    for index, image_file_path, audio_file_path in zip(count(1), image_file_paths, audio_file_paths):
+    for index, image_file_path, audio_file_path_dict in zip(count(1), image_file_paths, audio_file_paths):
+        audio_file_path = audio_file_path_dict['audio']
+        audio_subtitles_file_path = audio_file_path_dict['subtitles']
         output_file_path = output_dir / output_filename.substitute(index=index)
-        p = convert_video(image_file_path, audio_file_path, output_file_path, ffmpeg_file_path, encoding)
+        p = convert_video(image_file_path, audio_file_path, audio_subtitles_file_path, output_file_path, ffmpeg_file_path, encoding)
         result.append(p)
 
     return result
@@ -181,6 +243,7 @@ async def main_process(ppt_file_path: Path,
         audio_file_paths = await convert_notes_to_audio(notes=available_notes,
                                                         output_dir=audio_dir_path,
                                                         output_filename=Template('note-${index}.aac'),
+                                                        output_subtitles_filename=Template('subtitles-${index}.srt'),
                                                         voice=voice)
 
         image_dir_path = tmp_dir_path / 'images'
@@ -272,8 +335,8 @@ def parse_args() -> argparse.Namespace:
     parser_convert = subparsers.add_parser('convert')
     parser_convert.add_argument('-i', '--infile', type=Path, help='add PPT file(s)', required=True)
     parser_convert.add_argument('outfile', type=Path, help='set output video filename')
-    parser_convert.add_argument('--soffice-file-path', type=Path, default=Path('/usr/bin/soffice'))
-    parser_convert.add_argument('--ffmpeg-file-path', type=Path, default=Path('/usr/bin/ffmpeg'))
+    parser_convert.add_argument('--soffice-file-path', type=Path, default=Path(shutil.which('soffice')))
+    parser_convert.add_argument('--ffmpeg-file-path', type=Path, default=Path(shutil.which('ffmpeg')))
     parser_convert.add_argument('--dpi', type=int, default=75)
     parser_convert.add_argument('--voice', type=str, default='zh-CN-XiaoxiaoNeural')
     parser_convert.add_argument('--encoding', type=str, default=locale.getpreferredencoding())
