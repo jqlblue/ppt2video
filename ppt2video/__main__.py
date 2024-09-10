@@ -20,6 +20,7 @@ from typing import Any, TypeGuard
 import shutil
 import math
 from xml.sax.saxutils import escape
+from deep_translator import GoogleTranslator
 
 def get_note_from_slide(slide: Slide) -> str | None:
     if not slide.has_notes_slide:
@@ -92,19 +93,33 @@ async def convert_ppt_to_image(ppt_file_path: Path,
 async def convert_note_to_audio(note: str,
                           output_file_path: Path,
                           output_subtitles_file_path: Path,
+                          souce_lang:str,
+                          target_lang:str,
                           voice: str) -> dict:
-    communicate_note = edge_tts.Communicate(note, voice)
+    show_target_subtitiles = False
+    if souce_lang == target_lang:
+        source_note = note
+        target_note = note
+    else:
+        source_note = note
+        target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(note)
+        show_target_subtitiles = True
 
+    #en_note = GoogleTranslator(source='auto', target='en').translate(note)
+    communicate_note = edge_tts.Communicate(target_note, voice)
+
+    logger.info('Generate Audio souce_lang = `{souce_lang}`, target_lang = `{target_lang}`', souce_lang=souce_lang,target_lang=target_lang)
     # parse note text to note_sections array
-    note_paragraphs = note.split("\n")
-    logger.info('Generate Audio communicate note_paragraphs `{note_paragraphs}`', note_paragraphs=note_paragraphs)
+    target_note_paragraphs = target_note.split("\n")
+    source_note_paragraphs = source_note.split("\n")
+    logger.info('Generate Audio communicate note_paragraphs `{note_paragraphs}`', note_paragraphs=source_note_paragraphs)
 
     srt_index = 1
     last_start_time = 0
 
-    for index, note_paragraph in enumerate(note_paragraphs, start=1):
-        if note_paragraph != '':
-            communicate_note_paragraph = edge_tts.Communicate(note_paragraph, voice)
+    for index, target_note_paragraph in enumerate(target_note_paragraphs, start=1):
+        if target_note_paragraph != '':
+            communicate_note_paragraph = edge_tts.Communicate(target_note_paragraph, voice)
 
             start_time = 0
             end_time = 0
@@ -127,7 +142,9 @@ async def convert_note_to_audio(note: str,
             with open(output_subtitles_file_path, "ab") as srt_file:
                 srt_file.write(f"{srt_index}\n".encode())
                 srt_file.write(f"{start_time_srt} --> {end_time_srt}\n".encode())
-                srt_file.write(f"{escape(note_paragraph)}\n\n".encode())
+                srt_file.write(f"{escape(source_note_paragraphs[index-1])}\n\n\n\n".encode())
+                if show_target_subtitiles:
+                    srt_file.write(f"{escape(target_note_paragraph)}\n\n".encode())
 
             logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
 
@@ -147,13 +164,15 @@ async def convert_notes_to_audio(notes: list[str],
                                  output_dir: Path,
                                  output_filename: Template,
                                  output_subtitles_filename: Template,
+                                 source_lang:str,
+                                 target_lang:str,
                                  voice: str) -> list[dict]:
     tasks = list()
     async with asyncio.TaskGroup() as tg:
         for index, note in enumerate(notes, start=1):
             output_file_path = output_dir / output_filename.substitute(index=index)
             output_subtitles_file_path = output_dir / output_subtitles_filename.substitute(index=index)
-            tasks.append(tg.create_task(convert_note_to_audio(note, output_file_path, output_subtitles_file_path, voice)))
+            tasks.append(tg.create_task(convert_note_to_audio(note, output_file_path, output_subtitles_file_path, source_lang, target_lang, voice)))
 
     return list(map(lambda task: task.result(), tasks))
 
@@ -167,7 +186,7 @@ def convert_video(image_file_path: Path,
                              '-loop', '1',
                              '-i', image_file_path,
                              '-i', audio_file_path,
-                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='Alignment=2,MarginV=35,Fontsize=21,OutlineColour=&H40000000,Spacing=0.3,BorderStyle=1,Outline=0.5,Shadow=0'",
+                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='Alignment=2,MarginV=35,Fontsize=25'",
                              '-c:v', 'libx264',
                              '-c:a', 'copy',
                              '-shortest',
@@ -229,6 +248,8 @@ async def main_process(ppt_file_path: Path,
                        ffmpeg_file_path: Path,
                        dpi: int,
                        voice: str,
+                       source_lang:str,
+                       target_lang:str,
                        encoding: str) -> Path:
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
@@ -244,6 +265,8 @@ async def main_process(ppt_file_path: Path,
                                                         output_dir=audio_dir_path,
                                                         output_filename=Template('note-${index}.aac'),
                                                         output_subtitles_filename=Template('subtitles-${index}.srt'),
+                                                        source_lang=source_lang,
+                                                        target_lang=target_lang,
                                                         voice=voice)
 
         image_dir_path = tmp_dir_path / 'images'
@@ -279,6 +302,8 @@ async def convert(args: argparse.Namespace) -> Path:
                         ffmpeg_file_path=args.ffmpeg_file_path,
                         dpi=args.dpi,
                         voice=args.voice,
+                        source_lang=args.lang,
+                        target_lang=args.target_lang,
                         encoding=args.encoding)
     return result
 
@@ -339,6 +364,8 @@ def parse_args() -> argparse.Namespace:
     parser_convert.add_argument('--ffmpeg-file-path', type=Path, default=Path(shutil.which('ffmpeg')))
     parser_convert.add_argument('--dpi', type=int, default=75)
     parser_convert.add_argument('--voice', type=str, default='zh-CN-XiaoxiaoNeural')
+    parser_convert.add_argument('--lang', type=str, default='zh-CN')
+    parser_convert.add_argument('--target-lang', type=str, default='zh-CN')
     parser_convert.add_argument('--encoding', type=str, default=locale.getpreferredencoding())
     parser_convert.set_defaults(func=convert)
 
