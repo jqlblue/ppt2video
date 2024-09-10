@@ -123,17 +123,19 @@ async def convert_note_to_audio(note: str,
 
             start_time = 0
             end_time = 0
-
+            chunk_count = 1
             async for chunk in communicate_note_paragraph.stream():
                 if chunk["type"] == "WordBoundary":
                     if start_time == 0:
                         start_time = chunk["offset"]
                     end_time = chunk["offset"] + chunk["duration"]
+                    chunk_count += 1
 
             if last_start_time != 0:
                 start_time_srt = ms_to_srt_time(last_start_time)
-                end_time_srt = ms_to_srt_time(end_time + last_start_time)
-                last_start_time = end_time + last_start_time
+                adjust_end_time = start_time * chunk_count + end_time + last_start_time
+                end_time_srt = ms_to_srt_time(adjust_end_time)
+                last_start_time = adjust_end_time
             else:
                 start_time_srt = ms_to_srt_time(start_time)
                 end_time_srt = ms_to_srt_time(end_time)
@@ -186,7 +188,7 @@ def convert_video(image_file_path: Path,
                              '-loop', '1',
                              '-i', image_file_path,
                              '-i', audio_file_path,
-                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='Alignment=2,MarginV=35,Fontsize=25'",
+                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='BackColour=&H80000000,Spacing=0.2,Outline=0,Shadow=0.75,Alignment=2,MarginV=25,Fontsize=20'",
                              '-c:v', 'libx264',
                              '-c:a', 'copy',
                              '-shortest',
