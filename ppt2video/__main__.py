@@ -21,6 +21,9 @@ import shutil
 import math
 from xml.sax.saxutils import escape
 from deep_translator import GoogleTranslator
+from pypinyin import lazy_pinyin
+import re
+from num2words import num2words
 
 def get_note_from_slide(slide: Slide) -> str | None:
     if not slide.has_notes_slide:
@@ -38,6 +41,19 @@ def ms_to_srt_time(time_unit):
     minute = math.floor((time_unit / 10**7 / 60) % 60)
     seconds = (time_unit / 10**7) % 60
     return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
+
+def replace_markers_with_pinyin(match):
+    match_text = match.group(1)
+    pinyin_text = "".join(lazy_pinyin(match_text))
+    return pinyin_text.capitalize()
+
+def replace_markers_only(match):
+    match_text = match.group(1)
+    return match_text
+
+def replace_numbers(match):
+    number = int(match.group())
+    return num2words(number)
 
 def get_notes_from_ppt_file(ppt_file_path: Path) -> list[str | None]:
     prs = Presentation(ppt_file_path)
@@ -102,13 +118,22 @@ async def convert_note_to_audio(note: str,
         target_note = note
     else:
         source_note = note
-        target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(note)
+        if souce_lang == 'zh-CN':
+            pinyin_note = re.sub(r'\{(.*?)\}', replace_markers_with_pinyin, note)
+            target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(pinyin_note)
+            source_note = re.sub(r'\{(.*?)\}', replace_markers_only, note)
+        else:
+            target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(note)
+
         show_target_subtitiles = True
 
-    #en_note = GoogleTranslator(source='auto', target='en').translate(note)
-    communicate_note = edge_tts.Communicate(target_note, voice)
+    if show_target_subtitiles and souce_lang == 'zh-CN':
+        # use zh voice, so replace number on note
+        communicate_note = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_note), voice)
+    else:
+        communicate_note = edge_tts.Communicate(target_note, voice)
 
-    logger.info('Generate Audio souce_lang = `{souce_lang}`, target_lang = `{target_lang}`', souce_lang=souce_lang,target_lang=target_lang)
+    logger.info('Generate Audio souce_lang = `{souce_lang}`, target_lang = `{target_lang}`, target_note = `{target_note}`', souce_lang=souce_lang, target_lang=target_lang, target_note=target_note)
     # parse note text to note_sections array
     target_note_paragraphs = target_note.split("\n")
     source_note_paragraphs = source_note.split("\n")
@@ -119,7 +144,10 @@ async def convert_note_to_audio(note: str,
 
     for index, target_note_paragraph in enumerate(target_note_paragraphs, start=1):
         if target_note_paragraph != '':
-            communicate_note_paragraph = edge_tts.Communicate(target_note_paragraph, voice)
+            if show_target_subtitiles and souce_lang == 'zh-CN':
+                communicate_note_paragraph = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_note_paragraph), voice)
+            else:
+                communicate_note_paragraph = edge_tts.Communicate(target_note_paragraph, voice)
 
             start_time = 0
             end_time = 0
