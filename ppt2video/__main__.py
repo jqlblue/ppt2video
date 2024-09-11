@@ -21,7 +21,7 @@ import shutil
 import math
 from xml.sax.saxutils import escape
 from deep_translator import GoogleTranslator
-from pypinyin import lazy_pinyin
+from pypinyin import pinyin
 import re
 from num2words import num2words
 
@@ -44,8 +44,11 @@ def ms_to_srt_time(time_unit):
 
 def replace_markers_with_pinyin(match):
     match_text = match.group(1)
-    pinyin_text = "".join(lazy_pinyin(match_text))
-    return pinyin_text.capitalize()
+    pinyin_texts = pinyin(match_text)
+    dest_texts = []
+    for pinyin_text in pinyin_texts:
+        dest_texts.append(f"{pinyin_text[0]}".capitalize())
+    return "".join(dest_texts)
 
 def replace_markers_only(match):
     match_text = match.group(1)
@@ -133,11 +136,10 @@ async def convert_note_to_audio(note: str,
     else:
         communicate_note = edge_tts.Communicate(target_note, voice)
 
-    logger.info('Generate Audio souce_lang = `{souce_lang}`, target_lang = `{target_lang}`, target_note = `{target_note}`', souce_lang=souce_lang, target_lang=target_lang, target_note=target_note)
     # parse note text to note_sections array
     target_note_paragraphs = target_note.split("\n")
     source_note_paragraphs = source_note.split("\n")
-    logger.info('Generate Audio communicate note_paragraphs `{note_paragraphs}`', note_paragraphs=source_note_paragraphs)
+    logger.info('Generate Audio Subtitles from note_paragraphs `{note_paragraphs}`', note_paragraphs=source_note_paragraphs)
 
     srt_index = 1
     last_start_time = 0
@@ -211,12 +213,13 @@ def convert_video(image_file_path: Path,
                   audio_subtitles_file_path: Path,
                   output_file_path: Path,
                   ffmpeg_file_path: Path,
+                  subtitles_font:str,
                   encoding: str) -> Path:
     output = subprocess.run([ffmpeg_file_path,
                              '-loop', '1',
                              '-i', image_file_path,
                              '-i', audio_file_path,
-                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='BackColour=&H80000000,Spacing=0.2,Outline=0,Shadow=0.75,Alignment=2,MarginV=25,Fontsize=20'",
+                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='BackColour=&HB0000000,Spacing=0.2,Outline=0,Shadow=0.75,Alignment=2,MarginV=25,Fontname={subtitles_font},Fontsize=20,Bold=-1,Borderstyle=3'",
                              '-c:v', 'libx264',
                              '-c:a', 'copy',
                              '-shortest',
@@ -232,6 +235,7 @@ def convert_videos(image_file_paths: list[Path],
                   output_dir: Path,
                   output_filename: Template,
                   ffmpeg_file_path: Path,
+                  subtitles_font:str,
                   encoding: str) -> list[Path]:
     result = list()
 
@@ -239,7 +243,7 @@ def convert_videos(image_file_paths: list[Path],
         audio_file_path = audio_file_path_dict['audio']
         audio_subtitles_file_path = audio_file_path_dict['subtitles']
         output_file_path = output_dir / output_filename.substitute(index=index)
-        p = convert_video(image_file_path, audio_file_path, audio_subtitles_file_path, output_file_path, ffmpeg_file_path, encoding)
+        p = convert_video(image_file_path, audio_file_path, audio_subtitles_file_path, output_file_path, ffmpeg_file_path, subtitles_font, encoding)
         result.append(p)
 
     return result
@@ -280,6 +284,7 @@ async def main_process(ppt_file_path: Path,
                        voice: str,
                        source_lang:str,
                        target_lang:str,
+                       subtitles_font:str,
                        encoding: str) -> Path:
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
@@ -316,6 +321,7 @@ async def main_process(ppt_file_path: Path,
                                           output_dir=video_dir_path,
                                           output_filename=Template('video-${index}.mp4'),
                                           ffmpeg_file_path=ffmpeg_file_path,
+                                          subtitles_font=subtitles_font,
                                           encoding=encoding)
 
         result = concat_videos(video_file_paths=video_file_paths,
@@ -334,6 +340,7 @@ async def convert(args: argparse.Namespace) -> Path:
                         voice=args.voice,
                         source_lang=args.lang,
                         target_lang=args.target_lang,
+                        subtitles_font=args.subtitles_font,
                         encoding=args.encoding)
     return result
 
@@ -396,6 +403,7 @@ def parse_args() -> argparse.Namespace:
     parser_convert.add_argument('--voice', type=str, default='zh-CN-XiaoxiaoNeural')
     parser_convert.add_argument('--lang', type=str, default='zh-CN')
     parser_convert.add_argument('--target-lang', type=str, default='zh-CN')
+    parser_convert.add_argument('--subtitles-font', type=str, default='Arial')
     parser_convert.add_argument('--encoding', type=str, default=locale.getpreferredencoding())
     parser_convert.set_defaults(func=convert)
 

@@ -17,6 +17,10 @@ $ poetry run python ppt2video convert --dpi 300 --voice "zh-CN-YunxiNeural" -i .
 ```
 
 ```
+poetry run python ppt2video convert --voice="en-US-MichelleNeural" --dpi=300 --subtitles-font="LXGW Bright TC" --target-lang="en" -i .\input.pptx .\output.mp4
+```
+
+```
 $ poetry run python ppt2video list-voices --language zh --gender female
 ```
 
