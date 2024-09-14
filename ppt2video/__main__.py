@@ -21,7 +21,7 @@ import shutil
 import math
 from xml.sax.saxutils import escape
 from deep_translator import GoogleTranslator
-from pypinyin import pinyin
+from pypinyin import lazy_pinyin
 import re
 from num2words import num2words
 
@@ -42,16 +42,36 @@ def ms_to_srt_time(time_unit):
     seconds = (time_unit / 10**7) % 60
     return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
 
-def replace_markers_with_pinyin(match):
+def replace_markers_target(match):
     match_text = match.group(1)
-    pinyin_texts = pinyin(match_text)
-    dest_texts = []
-    for pinyin_text in pinyin_texts:
-        dest_texts.append(f"{pinyin_text[0]}".capitalize())
-    return "".join(dest_texts)
+    target_text = ''
+    if match_text.endswith("||"):
+        match_texts = match_text.split("||")
+        match_text = match_texts[0]
+    elif match_text.find("|") != -1:
+        match_texts = match_text.split("|")
+        target_text = match_texts[1]
+    if target_text == '':
+        pinyin_texts = lazy_pinyin(match_text)
+        dest_texts = []
+        for pinyin_text in pinyin_texts:
+            dest_texts.append(f"{pinyin_text}".capitalize())
+        target_text =  " ".join(dest_texts)
+    return target_text
 
-def replace_markers_only(match):
+
+def replace_markers_source(match):
     match_text = match.group(1)
+    if match_text.endswith("||"):
+        match_texts = match_text.split("||")
+        target_text = match_texts[0]
+        return target_text
+
+    if match_text.find("|") != -1:
+        match_texts = match_text.split("|")
+        target_text = match_texts[0]
+        return target_text
+
     return match_text
 
 def replace_numbers(match):
@@ -116,36 +136,57 @@ async def convert_note_to_audio(note: str,
                           target_lang:str,
                           voice: str) -> dict:
     show_target_subtitiles = False
-    if souce_lang == target_lang:
-        source_note = note
-        target_note = note
-    else:
-        source_note = note
-        if souce_lang == 'zh-CN':
-            pinyin_note = re.sub(r'\{(.*?)\}', replace_markers_with_pinyin, note)
-            target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(pinyin_note)
-            source_note = re.sub(r'\{(.*?)\}', replace_markers_only, note)
-        else:
-            target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(note)
+    default_chinese_voice = 'zh-CN-XiaoxiaoNeural'
 
-        show_target_subtitiles = True
+    source_note_paragraphs = []
+    target_note_paragraphs = []
+    target_voice_paragraphs = []
+
+    notes = note.split("\n")
+    notes = list(filter(None, notes))
+    notes = [item for item in notes if item.strip()]
+
+    for note_paragraph in notes:
+        if souce_lang == target_lang:
+            source_note_paragraphs.append(note_paragraph)
+            target_note_paragraphs = source_note_paragraphs
+            target_voice_paragraphs = source_note_paragraphs
+        else:
+            show_target_subtitiles = True
+            if souce_lang == 'zh-CN':
+                replace_markers = re.sub(r'\{(.*?)\}', replace_markers_target, note_paragraph)
+                source_note = re.sub(r'\{(.*?)\}', replace_markers_source, note_paragraph)
+                source_note_paragraphs.append(source_note)
+                if note.find("||") != -1:
+                    target_note = replace_markers
+                    target_voice_note = source_note
+                    voice = default_chinese_voice
+                else:
+                    replace_markers=replace_markers.replace('\n', "#")
+                    target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers)
+                    target_note = target_note.replace('.', '\n')
+                    target_note = target_note.replace('#', '\n')
+                    target_voice_note = target_note
+
+                target_note_paragraphs.append(target_note)
+                target_voice_paragraphs.append(target_voice_note)
 
     if show_target_subtitiles and souce_lang == 'zh-CN':
         # use zh voice, so replace number on note
-        communicate_note = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_note), voice)
+        communicate_note = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, " ".join(target_voice_paragraphs)), voice)
     else:
-        communicate_note = edge_tts.Communicate(target_note, voice)
-
-    # parse note text to note_sections array
-    target_note_paragraphs = target_note.split("\n")
-    source_note_paragraphs = source_note.split("\n")
-    logger.info('Generate Audio Subtitles from note_paragraphs `{note_paragraphs}`', note_paragraphs=source_note_paragraphs)
+        communicate_note = edge_tts.Communicate("\n,".join(target_voice_note), voice)
 
     srt_index = 1
     last_start_time = 0
 
-    for index, target_note_paragraph in enumerate(target_note_paragraphs, start=1):
-        if target_note_paragraph != '':
+    logger.info('Generate Audio Subtitles from source_note_paragraphs srt_index = `{srt_index}`, `{source_note_paragraphs}`', source_note_paragraphs=source_note_paragraphs,srt_index=srt_index)
+    logger.info('Generate Audio Subtitles from target_note_paragraphs srt_index = `{srt_index}`, `{target_note_paragraphs}`', target_note_paragraphs=target_note_paragraphs,srt_index=srt_index)
+    logger.info('Generate Audio Subtitles from target_voice_paragraphs srt_index = `{srt_index}`, `{target_voice_paragraphs}`', target_voice_paragraphs=target_voice_paragraphs,srt_index=srt_index)
+
+    for index, target_voice_paragraph in enumerate(target_voice_paragraphs, start=1):
+        if target_voice_paragraph != '':
+            target_note_paragraph = target_note_paragraphs[index-1]
             if show_target_subtitiles and souce_lang == 'zh-CN':
                 communicate_note_paragraph = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_note_paragraph), voice)
             else:
@@ -172,13 +213,13 @@ async def convert_note_to_audio(note: str,
                 last_start_time = end_time
 
             with open(output_subtitles_file_path, "ab") as srt_file:
+                logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
+
                 srt_file.write(f"{srt_index}\n".encode())
                 srt_file.write(f"{start_time_srt} --> {end_time_srt}\n".encode())
                 srt_file.write(f"{escape(source_note_paragraphs[index-1])}\n\n\n\n".encode())
                 if show_target_subtitiles:
                     srt_file.write(f"{escape(target_note_paragraph)}\n\n".encode())
-
-            logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
 
             # update subtitles index
             srt_index += 1
@@ -219,7 +260,7 @@ def convert_video(image_file_path: Path,
                              '-loop', '1',
                              '-i', image_file_path,
                              '-i', audio_file_path,
-                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='BackColour=&HB0000000,Spacing=0.2,Outline=0,Shadow=0.75,Alignment=2,MarginV=25,Fontname={subtitles_font},Fontsize=20,Bold=-1,Borderstyle=3'",
+                             '-vf', f"subtitles={audio_subtitles_file_path}:force_style='BackColour=&HB0000000,Spacing=0.2,Outline=0,Shadow=0.75,Alignment=2,MarginV=25,Fontname={subtitles_font},Fontsize=18,Bold=-1,Borderstyle=3'",
                              '-c:v', 'libx264',
                              '-c:a', 'copy',
                              '-shortest',
