@@ -5,3 +5,4 @@ ppt2video/__pycache__
 *.png
 *.aac
 *.mp4
+poetry.lock

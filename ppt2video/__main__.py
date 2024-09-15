@@ -24,6 +24,7 @@ from deep_translator import GoogleTranslator
 from pypinyin import lazy_pinyin
 import re
 from num2words import num2words
+from pydub import AudioSegment
 
 def get_note_from_slide(slide: Slide) -> str | None:
     if not slide.has_notes_slide:
@@ -37,10 +38,10 @@ def get_note_from_slide(slide: Slide) -> str | None:
 
 # convert edge tts vtt timestamp to srt format
 def ms_to_srt_time(time_unit):
-    hour = math.floor(time_unit / 10**7 / 3600)
-    minute = math.floor((time_unit / 10**7 / 60) % 60)
-    seconds = (time_unit / 10**7) % 60
-    return f"{hour:02d}:{minute:02d}:{seconds:06.3f}"
+    seconds, milliseconds = divmod(time_unit, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
 def replace_markers_target(match):
     match_text = match.group(1)
@@ -160,57 +161,50 @@ async def convert_note_to_audio(note: str,
                 if note.find("||") != -1:
                     target_note = replace_markers
                     target_voice_note = source_note
-                    voice = default_chinese_voice
+                    #voice = default_chinese_voice
                 else:
-                    replace_markers=replace_markers.replace('\n', "#")
+                    #replace_markers=replace_markers.replace('\n', "#")
                     target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers)
-                    target_note = target_note.replace('.', '\n')
-                    target_note = target_note.replace('#', '\n')
+                    #target_note = target_note.replace('.', '\n')
+                    #target_note = target_note.replace('#', '\n')
                     target_voice_note = target_note
 
                 target_note_paragraphs.append(target_note)
                 target_voice_paragraphs.append(target_voice_note)
 
-    if show_target_subtitiles and souce_lang == 'zh-CN':
-        # use zh voice, so replace number on note
-        communicate_note = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, " ".join(target_voice_paragraphs)), voice)
-    else:
-        communicate_note = edge_tts.Communicate("\n,".join(target_voice_note), voice)
-
     srt_index = 1
-    last_start_time = 0
 
-    logger.info('Generate Audio Subtitles from source_note_paragraphs srt_index = `{srt_index}`, `{source_note_paragraphs}`', source_note_paragraphs=source_note_paragraphs,srt_index=srt_index)
-    logger.info('Generate Audio Subtitles from target_note_paragraphs srt_index = `{srt_index}`, `{target_note_paragraphs}`', target_note_paragraphs=target_note_paragraphs,srt_index=srt_index)
     logger.info('Generate Audio Subtitles from target_voice_paragraphs srt_index = `{srt_index}`, `{target_voice_paragraphs}`', target_voice_paragraphs=target_voice_paragraphs,srt_index=srt_index)
 
+    output_acc_paragraphs = []
+
+    start_time = 0
+    end_time = 0
+
     for index, target_voice_paragraph in enumerate(target_voice_paragraphs, start=1):
+        output_acc_paragraph = f"{output_file_path}-paragraph-{index}.acc"
         if target_voice_paragraph != '':
             target_note_paragraph = target_note_paragraphs[index-1]
             if show_target_subtitiles and souce_lang == 'zh-CN':
-                communicate_note_paragraph = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_note_paragraph), voice)
+                if note.find("||") != -1:
+                    communicate_note_paragraph = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_voice_paragraph), default_chinese_voice)
+                else:
+                    communicate_note_paragraph = edge_tts.Communicate(re.sub(r'\d+', replace_numbers, target_voice_paragraph), voice)
             else:
                 communicate_note_paragraph = edge_tts.Communicate(target_note_paragraph, voice)
 
-            start_time = 0
-            end_time = 0
-            chunk_count = 1
-            async for chunk in communicate_note_paragraph.stream():
-                if chunk["type"] == "WordBoundary":
-                    if start_time == 0:
-                        start_time = chunk["offset"]
-                    end_time = chunk["offset"] + chunk["duration"]
-                    chunk_count += 1
+            await communicate_note_paragraph.save(output_acc_paragraph)
 
-            if last_start_time != 0:
-                start_time_srt = ms_to_srt_time(last_start_time)
-                adjust_end_time = start_time * chunk_count + end_time + last_start_time
-                end_time_srt = ms_to_srt_time(adjust_end_time)
-                last_start_time = adjust_end_time
-            else:
-                start_time_srt = ms_to_srt_time(start_time)
-                end_time_srt = ms_to_srt_time(end_time)
-                last_start_time = end_time
+            audio = AudioSegment.from_mp3(output_acc_paragraph)
+
+            duration_ms = len(audio)
+
+            end_time = start_time + duration_ms
+
+            start_time_srt = ms_to_srt_time(start_time)
+            end_time_srt = ms_to_srt_time(end_time)
+
+            start_time = end_time
 
             with open(output_subtitles_file_path, "ab") as srt_file:
                 logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
@@ -221,10 +215,16 @@ async def convert_note_to_audio(note: str,
                 if show_target_subtitiles:
                     srt_file.write(f"{escape(target_note_paragraph)}\n\n".encode())
 
+            output_acc_paragraphs.append(output_acc_paragraph)
+
             # update subtitles index
             srt_index += 1
 
-    await communicate_note.save(output_file_path)
+    combined_audio = AudioSegment.empty()
+    for paragraphs_acc in output_acc_paragraphs:
+        audio = AudioSegment.from_mp3(paragraphs_acc)
+        combined_audio += audio
+    combined_audio.export(output_file_path, format="mp3")
 
     logger.info('Generate Audio file from note in `{output_file_path}`', output_file_path=output_file_path)
 
