@@ -43,7 +43,37 @@ def ms_to_srt_time(time_unit):
     hours, minutes = divmod(minutes, 60)
     return f"{hours:02}:{minutes:02}:{seconds:02},{milliseconds:03}"
 
-def replace_markers_target(match):
+def replace_pinyin_withtts(pinyin_text):
+    start_mapping = dict(
+        zh = 'j',
+        ch = 'ch',
+        z = 'dz',
+        c = 'ts',
+        # x = 'sh',
+        #j = 'dj',
+        # q = 'tch',
+        # r = 'er'
+    )
+    for key in start_mapping:
+        mapp_item = start_mapping[key]
+        if pinyin_text.find(key) != -1:
+            return pinyin_text.replace(key, mapp_item)
+    return pinyin_text
+
+def replace_pinyin_text(match_text:str, use_tts:bool):
+    pinyin_texts = lazy_pinyin(match_text)
+    dest_texts = []
+    for pinyin_text in pinyin_texts:
+        if use_tts:
+            pinyin_text = replace_pinyin_withtts(pinyin_text)
+        dest_texts.append(f"{pinyin_text}")
+    if len(pinyin_texts) > 1:
+        target_text =  " ".join(dest_texts)
+    else:
+        target_text =  "".join(dest_texts)
+    return target_text
+
+def replace_markers_target_pinyin_withtts(match):
     match_text = match.group(1)
     target_text = ''
     if match_text.endswith("||"):
@@ -52,21 +82,54 @@ def replace_markers_target(match):
     elif match_text.find("|") != -1:
         match_texts = match_text.split("|")
         target_text = match_texts[1]
+        target_text =  replace_pinyin_withtts(target_text)
+
     if target_text == '':
-        pinyin_texts = lazy_pinyin(match_text)
-        dest_texts = []
-        for pinyin_text in pinyin_texts:
-            dest_texts.append(f"{pinyin_text}".capitalize())
-        target_text =  " ".join(dest_texts)
+        target_text =  replace_pinyin_text(match_text, True)
     return target_text
 
-
-def replace_markers_source(match):
+def replace_markers_target_pinyin(match):
     match_text = match.group(1)
+    target_text = ''
+    if match_text.endswith("||"):
+        match_texts = match_text.split("||")
+        match_text = match_texts[0]
+    elif match_text.find("|") != -1:
+        match_texts = match_text.split("|")
+        target_text = match_texts[1]
+
+    if target_text == '':
+        target_text =  replace_pinyin_text(match_text, False)
+    return target_text
+
+def replace_markers_target(match):
+    match_text = match.group(1)
+    target_text = ''
+    if match_text.find("|") != -1:
+        match_texts = match_text.split("|")
+        target_text = match_texts[1]
+    else:
+        target_text = match_text
+
+    return target_text
+
+def replace_markers_source_pinyin(match):
+    match_text = match.group(1)
+
     if match_text.endswith("||"):
         match_texts = match_text.split("||")
         target_text = match_texts[0]
         return target_text
+
+    if match_text.find("|") != -1:
+        match_texts = match_text.split("|")
+        target_text = match_texts[0]
+        return target_text
+
+    return match_text
+
+def replace_markers_source(match):
+    match_text = match.group(1)
 
     if match_text.find("|") != -1:
         match_texts = match_text.split("|")
@@ -156,18 +219,19 @@ async def convert_note_to_audio(note: str,
             show_target_subtitiles = True
             if souce_lang == 'zh-CN':
                 replace_markers = re.sub(r'\{(.*?)\}', replace_markers_target, note_paragraph)
-                source_note = re.sub(r'\{(.*?)\}', replace_markers_source, note_paragraph)
+                replace_markers_pinyin = re.sub(r'\[(.*?)\]', replace_markers_target_pinyin, replace_markers)
+                replace_markers_pinyin_withtts = re.sub(r'\[(.*?)\]', replace_markers_target_pinyin_withtts, replace_markers)
+                source_note_pinyin = re.sub(r'\[(.*?)\]', replace_markers_source_pinyin, note_paragraph)
+                source_note = re.sub(r'\{(.*?)\}', replace_markers_source, source_note_pinyin)
+
                 source_note_paragraphs.append(source_note)
+
                 if note.find("||") != -1:
-                    target_note = replace_markers
+                    target_note = replace_markers_pinyin
                     target_voice_note = source_note
-                    #voice = default_chinese_voice
                 else:
-                    #replace_markers=replace_markers.replace('\n', "#")
-                    target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers)
-                    #target_note = target_note.replace('.', '\n')
-                    #target_note = target_note.replace('#', '\n')
-                    target_voice_note = target_note
+                    target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers_pinyin)
+                    target_voice_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers_pinyin_withtts)
 
                 target_note_paragraphs.append(target_note)
                 target_voice_paragraphs.append(target_voice_note)
