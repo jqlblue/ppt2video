@@ -73,19 +73,21 @@ def replace_pinyin_text(match_text:str, use_tts:bool):
         target_text =  "".join(dest_texts)
     return target_text
 
-def replace_markers_target_pinyin_withtts(match):
+def remove_pinyin_markers_for_target(match):
     match_text = match.group(1)
-    target_text = ''
-    if match_text.endswith("||"):
-        match_texts = match_text.split("||")
-        match_text = match_texts[0]
-    elif match_text.find("|") != -1:
-        match_texts = match_text.split("|")
-        target_text = match_texts[1]
-        target_text =  replace_pinyin_withtts(target_text)
+    return match_text
 
-    if target_text == '':
-        target_text =  replace_pinyin_text(match_text, True)
+def remove_pinyin_markers_for_target_withtts(match):
+    match_text = match.group(1)
+    match_texts = match_text.split(" ")
+    dest_texts = []
+    for match_item in match_texts:
+        dest_item = replace_pinyin_text(match_item, True)
+        dest_texts.append(dest_item)
+    if len(dest_texts) > 1:
+        target_text =  " ".join(dest_texts)
+    else:
+        target_text =  "".join(dest_texts)
     return target_text
 
 def replace_markers_target_pinyin(match):
@@ -100,6 +102,22 @@ def replace_markers_target_pinyin(match):
 
     if target_text == '':
         target_text =  replace_pinyin_text(match_text, False)
+    return target_text
+
+def replace_markers_target_pinyin_with_marker(match):
+    match_text = match.group(1)
+    target_text = ''
+    if match_text.endswith("||"):
+        match_texts = match_text.split("||")
+        match_text = match_texts[0]
+    elif match_text.find("|") != -1:
+        match_texts = match_text.split("|")
+        target_text = match_texts[1]
+
+    if target_text == '':
+        target_text =  replace_pinyin_text(match_text, False)
+
+    target_text = f"#[{target_text}]#"
     return target_text
 
 def replace_markers_target(match):
@@ -198,13 +216,17 @@ async def convert_note_to_audio(note: str,
                           output_subtitles_file_path: Path,
                           souce_lang:str,
                           target_lang:str,
+                          subtitles_lang:str,
                           voice: str) -> dict:
-    show_target_subtitiles = False
+    show_target_subtitiles = True
     default_chinese_voice = 'zh-CN-XiaoxiaoNeural'
 
     source_note_paragraphs = []
     target_note_paragraphs = []
     target_voice_paragraphs = []
+
+    if subtitles_lang == '':
+        show_target_subtitiles = False
 
     notes = note.split("\n")
     notes = list(filter(None, notes))
@@ -219,26 +241,28 @@ async def convert_note_to_audio(note: str,
             show_target_subtitiles = True
             if souce_lang == 'zh-CN':
                 replace_markers = re.sub(r'\{(.*?)\}', replace_markers_target, note_paragraph)
-                replace_markers_pinyin = re.sub(r'\[(.*?)\]', replace_markers_target_pinyin, replace_markers)
-                replace_markers_pinyin_withtts = re.sub(r'\[(.*?)\]', replace_markers_target_pinyin_withtts, replace_markers)
+
                 source_note_pinyin = re.sub(r'\[(.*?)\]', replace_markers_source_pinyin, note_paragraph)
                 source_note = re.sub(r'\{(.*?)\}', replace_markers_source, source_note_pinyin)
 
                 source_note_paragraphs.append(source_note)
 
                 if note.find("||") != -1:
+                    replace_markers_pinyin = re.sub(r'\[(.*?)\]', replace_markers_target_pinyin, replace_markers)
                     target_note = replace_markers_pinyin
                     target_voice_note = source_note
                 else:
-                    target_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers_pinyin)
-                    target_voice_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(replace_markers_pinyin_withtts)
+                    target_note_pinyin_marker = re.sub(r'\[(.*?)\]', replace_markers_target_pinyin_with_marker, replace_markers)
+                    translator_note = GoogleTranslator(source=souce_lang, target=target_lang).translate(target_note_pinyin_marker)
+                    target_note = re.sub(r'\#\[(.*?)\]\#', remove_pinyin_markers_for_target, translator_note)
+                    target_voice_note = re.sub(r'\#\[(.*?)\]\#', remove_pinyin_markers_for_target_withtts, translator_note)
 
                 target_note_paragraphs.append(target_note)
                 target_voice_paragraphs.append(target_voice_note)
 
     srt_index = 1
 
-    logger.info('Generate Audio Subtitles from target_voice_paragraphs srt_index = `{srt_index}`, `{target_voice_paragraphs}`', target_voice_paragraphs=target_voice_paragraphs,srt_index=srt_index)
+    logger.info('Generate Audio Subtitles `{target_voice_paragraphs}`', target_voice_paragraphs=target_note_paragraphs)
 
     output_acc_paragraphs = []
 
@@ -259,30 +283,30 @@ async def convert_note_to_audio(note: str,
 
             await communicate_note_paragraph.save(output_acc_paragraph)
 
-            audio = AudioSegment.from_mp3(output_acc_paragraph)
+            if show_target_subtitiles:
+                audio = AudioSegment.from_mp3(output_acc_paragraph)
 
-            duration_ms = len(audio)
+                duration_ms = len(audio)
 
-            end_time = start_time + duration_ms
+                end_time = start_time + duration_ms
 
-            start_time_srt = ms_to_srt_time(start_time)
-            end_time_srt = ms_to_srt_time(end_time)
+                start_time_srt = ms_to_srt_time(start_time)
+                end_time_srt = ms_to_srt_time(end_time)
 
-            start_time = end_time
+                start_time = end_time
 
-            with open(output_subtitles_file_path, "ab") as srt_file:
-                logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
+                with open(output_subtitles_file_path, "ab") as srt_file:
+                    logger.info('Generate Audio Subtitles file from note_paragraph in `{output_subtitles_file_path}`, index = `{index}`', output_subtitles_file_path=output_subtitles_file_path, index = index)
 
-                srt_file.write(f"{srt_index}\n".encode())
-                srt_file.write(f"{start_time_srt} --> {end_time_srt}\n".encode())
-                srt_file.write(f"{escape(source_note_paragraphs[index-1])}\n\n\n\n".encode())
-                if show_target_subtitiles:
-                    srt_file.write(f"{escape(target_note_paragraph)}\n\n".encode())
+                    srt_file.write(f"{srt_index}\n".encode())
+                    srt_file.write(f"{start_time_srt} --> {end_time_srt}\n".encode())
+                    srt_file.write(f"{escape(source_note_paragraphs[index-1])}\n\n\n\n".encode())
+                    if show_target_subtitiles:
+                        srt_file.write(f"{escape(target_note_paragraph)}\n\n".encode())
 
-            output_acc_paragraphs.append(output_acc_paragraph)
+                output_acc_paragraphs.append(output_acc_paragraph)
 
-            # update subtitles index
-            srt_index += 1
+                srt_index += 1
 
     combined_audio = AudioSegment.empty()
     for paragraphs_acc in output_acc_paragraphs:
@@ -303,13 +327,14 @@ async def convert_notes_to_audio(notes: list[str],
                                  output_subtitles_filename: Template,
                                  source_lang:str,
                                  target_lang:str,
+                                 subtitles_lang:str,
                                  voice: str) -> list[dict]:
     tasks = list()
     async with asyncio.TaskGroup() as tg:
         for index, note in enumerate(notes, start=1):
             output_file_path = output_dir / output_filename.substitute(index=index)
             output_subtitles_file_path = output_dir / output_subtitles_filename.substitute(index=index)
-            tasks.append(tg.create_task(convert_note_to_audio(note, output_file_path, output_subtitles_file_path, source_lang, target_lang, voice)))
+            tasks.append(tg.create_task(convert_note_to_audio(note, output_file_path, output_subtitles_file_path, source_lang, target_lang, subtitles_lang, voice)))
 
     return list(map(lambda task: task.result(), tasks))
 
@@ -390,6 +415,7 @@ async def main_process(ppt_file_path: Path,
                        source_lang:str,
                        target_lang:str,
                        subtitles_font:str,
+                       subtitles_lang:str,
                        encoding: str) -> Path:
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
@@ -407,6 +433,7 @@ async def main_process(ppt_file_path: Path,
                                                         output_subtitles_filename=Template('subtitles-${index}.srt'),
                                                         source_lang=source_lang,
                                                         target_lang=target_lang,
+                                                        subtitles_lang=subtitles_lang,
                                                         voice=voice)
 
         image_dir_path = tmp_dir_path / 'images'
@@ -446,6 +473,7 @@ async def convert(args: argparse.Namespace) -> Path:
                         source_lang=args.lang,
                         target_lang=args.target_lang,
                         subtitles_font=args.subtitles_font,
+                        subtitles_lang=args.subtitles_lang,
                         encoding=args.encoding)
     return result
 
@@ -509,6 +537,7 @@ def parse_args() -> argparse.Namespace:
     parser_convert.add_argument('--lang', type=str, default='zh-CN')
     parser_convert.add_argument('--target-lang', type=str, default='zh-CN')
     parser_convert.add_argument('--subtitles-font', type=str, default='Arial')
+    parser_convert.add_argument('--subtitles-lang', type=str, default='')
     parser_convert.add_argument('--encoding', type=str, default=locale.getpreferredencoding())
     parser_convert.set_defaults(func=convert)
 
